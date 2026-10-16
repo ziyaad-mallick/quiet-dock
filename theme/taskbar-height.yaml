@@ -1,0 +1,8 @@
+# For the "Taskbar height and icon size" Windhawk mod (by m417z):
+# Settings > Textual mode, paste, Save settings.
+# 64 = a 42px pill + 16px of headroom above it + a 6px float gap below.
+TaskbarHeight: 64
+IconSize: 26
+TaskbarButtonWidth: 46
+IconSizeSmall: 16
+TaskbarButtonWidthSmall: 32
