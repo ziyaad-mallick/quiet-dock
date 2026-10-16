@@ -1,18 +1,44 @@
 // ==WindhawkMod==
-// @id              taskbar-autohide-instant-show
-// @name            Taskbar Auto-Hide Instant Show
-// @description     Removes the delay before the taskbar appears with custom animation types (none, slide, elastic, bounce, fade, slide+fade, overshoot)
+// @id              quiet-dock-reveal
+// @name            Quiet Dock Reveal
+// @description     Auto-hide taskbar that appears instantly with a smooth custom animation, and hides a set delay after the cursor leaves
 // @version         2.2
-// @author          Bo0ii
-// @github          https://github.com/Bo0ii
-// @homepage        https://github.com/Bo0ii/windhawk-mods
+// @author          ziyaad-mallick
+// @github          https://github.com/ziyaad-mallick
+// @homepage        https://github.com/ziyaad-mallick/quiet-dock
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lversion -ldwmapi
+// @compilerOptions -lversion -ldwmapi -luser32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
 /*
+# Quiet Dock Reveal
+
+A fork of [Taskbar Auto-Hide Instant Show](https://windhawk.net/mods/taskbar-autohide-instant-show)
+by [@Bo0ii](https://github.com/Bo0ii), part of
+[Quiet Dock](https://github.com/ziyaad-mallick/quiet-dock). Changes:
+
+* **Frames sync to the display.** The custom animations paced frames with
+  `Sleep()`, whose 15.6ms granularity turned 60fps into uneven 30ms/2ms
+  pairs. Each frame now waits for the compositor (`DwmFlush`), and progress
+  comes from the clock, so a late frame catches up instead of stretching the
+  animation.
+* **No stall when the taskbar appears.** The show path hid the taskbar by
+  toggling `WS_EX_LAYERED` around Windows' own slide call, which makes DWM
+  rebuild the window's surface (40-60ms at the start of every reveal). Now
+  Windows' window move is turned into a no-op instead.
+* **Hide delay counts from when the cursor leaves.** Windows hides from a
+  repeating timer armed when the taskbar appears, so the hide landed anywhere
+  within one period. The timer is now restarted by mouse movement over the
+  taskbar.
+* **Overshoot drops cleanly.** It springs on the way up only; the backward
+  pull on the way down read as a hitch.
+
+Windows still keeps the taskbar up while a window preview is open.
+
+---
+
 # Taskbar Auto-Hide Instant Show
 
 Removes the built-in delay before the auto-hidden taskbar starts appearing.
@@ -124,7 +150,9 @@ For all other modes, use *Show/Hide duration (ms)* to control timing.
 #include <math.h>
 #include <psapi.h>
 
+#include <algorithm>
 #include <atomic>
+#include <map>
 #include <vector>
 
 #ifndef M_PI
@@ -163,6 +191,19 @@ int g_slideWindowSpeedup;
 double g_slideWindowStartTime;
 double g_slideWindowLastFrameStartTime;
 std::atomic<int> g_animationGeneration{0};
+
+// While Windows' own show call runs, its window move is turned into a no-op
+// so the custom animation can start from where the taskbar is.
+DWORD g_suppressMoveThread = 0;
+HWND g_suppressMoveWindow = nullptr;
+
+// Windows hides the auto-hidden taskbar from a repeating "is the cursor
+// outside?" timer (id 2) armed when it appears, so the hide lands anywhere
+// within one period of the cursor leaving. Re-arming that timer on every
+// mouse move over the taskbar makes the delay count from when it leaves.
+constexpr UINT_PTR kHideTimerId = 2;
+std::map<HWND, TIMERPROC> g_hideTimers;  // taskbar thread only
+HHOOK g_mouseHook = nullptr;
 
 void TimerInitialize() {
     LARGE_INTEGER freq;
@@ -286,19 +327,17 @@ void DoCustomAnimation(HWND hWnd,
                        bool show,
                        int myAnimGen) {
     int animType = g_settings.animationType;
-    int duration = show ? g_settings.showDuration : g_settings.hideDuration;
+    double duration = (show ? g_settings.showDuration : g_settings.hideDuration) / 1000.0;
+
+    auto moveTo = [&](int x, int y, int w, int h) {
+        SetWindowPos(hWnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    };
 
     if (duration <= 0) {
-        SetWindowPos(hWnd, NULL, endRect->left, endRect->top,
-                     endRect->right - endRect->left,
-                     endRect->bottom - endRect->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        moveTo(endRect->left, endRect->top, endRect->right - endRect->left,
+               endRect->bottom - endRect->top);
         return;
     }
-
-    double frameDuration = 1000.0 / g_settings.frameRate;
-    int totalFrames = (int)(duration / frameDuration);
-    if (totalFrames < 1) totalFrames = 1;
 
     bool usePosition = (animType == 1 || animType == 2 || animType == 4 ||
                         animType == 5);
@@ -316,20 +355,21 @@ void DoCustomAnimation(HWND hWnd,
     }
 
     if (useFade && !usePosition && show) {
-        SetWindowPos(hWnd, NULL, endRect->left, endRect->top,
-                     endRect->right - endRect->left,
-                     endRect->bottom - endRect->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        moveTo(endRect->left, endRect->top, endRect->right - endRect->left,
+               endRect->bottom - endRect->top);
     }
 
+    // Progress comes from the clock, not a frame count, and every frame waits
+    // for the compositor: a late frame then skips ahead instead of stretching
+    // the animation, and frames land on the display's refresh instead of on
+    // Sleep()'s 15.6ms granularity.
     double startTime = TimerGetSeconds();
-
-    for (int i = 1; i <= totalFrames; i++) {
+    for (;;) {
         if (g_animationGeneration.load() != myAnimGen) {
             break;
         }
 
-        double t = (double)i / totalFrames;
+        double t = std::min(1.0, (TimerGetSeconds() - startTime) / duration);
 
         double posT = t;
         double alphaT = t;
@@ -356,9 +396,10 @@ void DoCustomAnimation(HWND hWnd,
         } else {
             switch (animType) {
                 case 1:
-                    posT = EaseInCubic(t);
-                    break;
                 case 2:
+                case 5:
+                    // Overshoot springs on the way up only; on the way down a
+                    // backward pull reads as a hitch.
                     posT = EaseInCubic(t);
                     break;
                 case 3:
@@ -368,61 +409,44 @@ void DoCustomAnimation(HWND hWnd,
                     posT = EaseInQuint(t);
                     alphaT = EaseInQuint(t);
                     break;
-                case 5:
-                    posT = EaseInBack(t);
-                    break;
             }
         }
 
         if (usePosition) {
-            int x = Lerp(startRect->left, endRect->left, posT);
-            int y = Lerp(startRect->top, endRect->top, posT);
-            int w = Lerp(startRect->right - startRect->left,
-                         endRect->right - endRect->left, posT);
-            int h = Lerp(startRect->bottom - startRect->top,
-                         endRect->bottom - endRect->top, posT);
-            SetWindowPos(hWnd, NULL, x, y, w, h,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            moveTo(Lerp(startRect->left, endRect->left, posT),
+                   Lerp(startRect->top, endRect->top, posT),
+                   Lerp(startRect->right - startRect->left,
+                        endRect->right - endRect->left, posT),
+                   Lerp(startRect->bottom - startRect->top,
+                        endRect->bottom - endRect->top, posT));
         }
 
         if (useFade) {
-            BYTE alpha;
-            if (show) {
-                alpha = (BYTE)(255.0 * alphaT);
-            } else {
-                alpha = (BYTE)(255.0 * (1.0 - alphaT));
-            }
+            BYTE alpha = (BYTE)(255.0 * (show ? alphaT : 1.0 - alphaT));
             if (alpha < 1) alpha = 1;
             SetLayeredWindowAttributes(hWnd, 0, alpha, LWA_ALPHA);
-            DwmFlush();
         }
 
-        if (!useFade) {
-            double targetTime =
-                startTime + (double)i * frameDuration / 1000.0;
-            double currentTime = TimerGetSeconds();
-            double sleepMs = (targetTime - currentTime) * 1000.0;
-            if (sleepMs > 1.0) {
-                Sleep_Original((DWORD)(sleepMs + 0.5));
-            }
+        if (t >= 1.0) {
+            break;
+        }
+
+        if (FAILED(DwmFlush())) {
+            Sleep_Original(1);
         }
     }
 
     if (usePosition) {
-        SetWindowPos(hWnd, NULL, endRect->left, endRect->top,
-                     endRect->right - endRect->left,
-                     endRect->bottom - endRect->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        moveTo(endRect->left, endRect->top, endRect->right - endRect->left,
+               endRect->bottom - endRect->top);
     }
 
     if (useFade) {
         if (!show) {
             SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
             DwmFlush();
-            SetWindowPos(hWnd, NULL, endRect->left, endRect->top,
-                         endRect->right - endRect->left,
-                         endRect->bottom - endRect->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            moveTo(endRect->left, endRect->top, endRect->right - endRect->left,
+                   endRect->bottom - endRect->top);
             DwmFlush();
         }
 
@@ -476,33 +500,17 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
         GetWindowRect(hWnd, &startRect);
 
         if (show) {
-            // Suppress pre-animation flash: hide window, let the
-            // original update internal TrayUI state invisibly, then
-            // restore the start position for our custom animation.
-            LONG_PTR exStyle = GetWindowLongPtr(hWnd, GWL_EXSTYLE);
-            bool addedLayered = !(exStyle & WS_EX_LAYERED);
-            if (addedLayered)
-                SetWindowLongPtr(hWnd, GWL_EXSTYLE,
-                                 exStyle | WS_EX_LAYERED);
-            SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
-            DwmFlush();
-
+            // Let the original update TrayUI's state with its window move
+            // turned into a no-op, then animate the move ourselves. (Hiding
+            // the window and moving it back instead means toggling
+            // WS_EX_LAYERED, which makes DWM rebuild the taskbar's surface:
+            // a 40-60ms stall at the start of every reveal.)
+            g_suppressMoveThread = GetCurrentThreadId();
+            g_suppressMoveWindow = hWnd;
             TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show,
                                         false);
-
-            // Move back to hidden start position
-            SetWindowPos(hWnd, NULL, startRect.left, startRect.top,
-                         startRect.right - startRect.left,
-                         startRect.bottom - startRect.top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
-
-            // Restore window style before custom animation
-            if (addedLayered) {
-                SetWindowLongPtr(hWnd, GWL_EXSTYLE, exStyle);
-            } else {
-                SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
-            }
-            DwmFlush();
+            g_suppressMoveWindow = nullptr;
+            g_suppressMoveThread = 0;
 
             DoCustomAnimation(hWnd, &startRect, rect, show, animGen);
         } else {
@@ -516,6 +524,58 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
 
 using SetTimer_t = decltype(&SetTimer);
 SetTimer_t SetTimer_Original;
+
+using SetWindowPos_t = decltype(&SetWindowPos);
+SetWindowPos_t SetWindowPos_Original;
+BOOL WINAPI SetWindowPos_Hook(HWND h, HWND after, int x, int y, int cx, int cy, UINT f) {
+    if (h == g_suppressMoveWindow && GetCurrentThreadId() == g_suppressMoveThread) {
+        f |= SWP_NOMOVE;
+    }
+    return SetWindowPos_Original(h, after, x, y, cx, cy, f);
+}
+
+static bool IsTaskbarWindow(HWND hWnd) {
+    wchar_t className[64];
+    return GetClassName(hWnd, className, ARRAYSIZE(className)) > 0 &&
+           (wcscmp(className, L"Shell_TrayWnd") == 0 ||
+            wcscmp(className, L"Shell_SecondaryTrayWnd") == 0);
+}
+
+// Sees every message the taskbar thread retrieves. Mouse moves over the
+// taskbar, and the leave messages sent when the cursor exits it, restart the
+// hide timer, so the delay counts from the moment the cursor leaves.
+LRESULT CALLBACK GetMessageHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && wParam == PM_REMOVE) {
+        const MSG* msg = (const MSG*)lParam;
+        switch (msg->message) {
+            case WM_MOUSEMOVE:
+            case WM_NCMOUSEMOVE:
+            case WM_MOUSELEAVE:
+            case WM_NCMOUSELEAVE:
+            case WM_POINTERUPDATE:
+            case WM_POINTERLEAVE: {
+                HWND root = msg->hwnd ? GetAncestor(msg->hwnd, GA_ROOT) : nullptr;
+                auto it = g_hideTimers.find(root);
+                if (it == g_hideTimers.end()) break;
+                // The taskbar also gets these when the cursor is elsewhere;
+                // only real movement over it, or the cursor leaving it,
+                // should restart the countdown.
+                bool leave = msg->message == WM_MOUSELEAVE ||
+                             msg->message == WM_NCMOUSELEAVE ||
+                             msg->message == WM_POINTERLEAVE;
+                POINT pt;
+                RECT rc;
+                bool over = GetCursorPos(&pt) && GetWindowRect(root, &rc) && PtInRect(&rc, pt);
+                if (leave || over) {
+                    SetTimer_Original(root, kHideTimerId, g_settings.hideDelay, it->second);
+                }
+                break;
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
 UINT_PTR WINAPI SetTimer_Hook(HWND hWnd,
                               UINT_PTR nIDEvent,
                               UINT uElapse,
@@ -527,10 +587,28 @@ UINT_PTR WINAPI SetTimer_Hook(HWND hWnd,
                 wcscmp(className, L"Shell_SecondaryTrayWnd") == 0) {
                 uElapse = (nIDEvent == 3) ? g_settings.unhideDelay
                                           : g_settings.hideDelay;
+                if (nIDEvent == kHideTimerId) {
+                    g_hideTimers[hWnd] = lpTimerFunc;
+                    // We're on the taskbar's thread here, which is where a
+                    // thread mouse hook has to be installed.
+                    if (!g_mouseHook) {
+                        g_mouseHook = SetWindowsHookEx(WH_GETMESSAGE, GetMessageHookProc, nullptr,
+                                                       GetCurrentThreadId());
+                    }
+                }
             }
         }
     }
     return SetTimer_Original(hWnd, nIDEvent, uElapse, lpTimerFunc);
+}
+
+using KillTimer_t = decltype(&KillTimer);
+KillTimer_t KillTimer_Original;
+BOOL WINAPI KillTimer_Hook(HWND hWnd, UINT_PTR nIDEvent) {
+    if (hWnd && nIDEvent == kHideTimerId) {
+        g_hideTimers.erase(hWnd);
+    }
+    return KillTimer_Original(hWnd, nIDEvent);
 }
 
 // --- Edge detection for empty monitors ---
@@ -933,6 +1011,12 @@ BOOL Wh_ModInit() {
         (decltype(&SetTimer))GetProcAddress(user32Module, "SetTimer");
     WindhawkUtils::Wh_SetFunctionHookT(pSetTimer, SetTimer_Hook,
                                        &SetTimer_Original);
+    WindhawkUtils::Wh_SetFunctionHookT(
+        (decltype(&SetWindowPos))GetProcAddress(user32Module, "SetWindowPos"),
+        SetWindowPos_Hook, &SetWindowPos_Original);
+    WindhawkUtils::Wh_SetFunctionHookT(
+        (decltype(&KillTimer))GetProcAddress(user32Module, "KillTimer"),
+        KillTimer_Hook, &KillTimer_Original);
 
     TimerInitialize();
 
@@ -956,6 +1040,10 @@ void Wh_ModAfterInit() {
 void Wh_ModUninit() {
     Wh_Log(L">");
     StopEdgeCheckThread();
+    if (g_mouseHook) {
+        UnhookWindowsHookEx(g_mouseHook);
+        g_mouseHook = nullptr;
+    }
 }
 
 BOOL Wh_ModSettingsChanged(BOOL* bReload) {

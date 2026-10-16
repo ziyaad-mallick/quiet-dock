@@ -1,15 +1,16 @@
-# For the "Taskbar Auto-Hide Instant Show" Windhawk mod (by Bo0ii), with
-# Windows' "Automatically hide the taskbar" on.
-# The dock springs up the moment the cursor touches the bottom edge, with a
-# slight overshoot, and drops away a second after the cursor leaves.
+# For Quiet Dock Reveal (mod/quiet-dock-reveal.wh.cpp, a fork of Taskbar
+# Auto-Hide Instant Show by Bo0ii), with Windows' "Automatically hide the
+# taskbar" on. The dock springs up the moment the cursor touches the bottom
+# edge, with a slight overshoot, and drops away hideDelay ms after the cursor
+# leaves. show/hideSpeedup only apply to animationType: slide.
 # edgeDetection stays off: it adds a thread that polls the cursor every 20ms.
 animationType: overshoot
-showSpeedup: 400
-hideSpeedup: 400
-showDuration: 420
+showSpeedup: 500
+hideSpeedup: 500
+showDuration: 470
 hideDuration: 200
 frameRate: 60
 unhideDelay: 1
-hideDelay: 1000
+hideDelay: 500
 oldTaskbarOnWin11: false
 edgeDetection: false

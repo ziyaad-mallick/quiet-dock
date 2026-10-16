@@ -87,8 +87,11 @@ def main():
         "taskbar-icon-size": ("1.3.10", height),
         "windows-11-taskbar-styler": ("1.10", styler),
         "local@quiet-dock": ("1.0.0", dock),
-        "taskbar-autohide-instant-show": ("2.2", autohide),
+        "local@quiet-dock-reveal": ("2.2", autohide),
     }
+    # Replaced by local@quiet-dock-reveal (a fork); both hook the same
+    # function, so the original must not run alongside it.
+    superseded = ["taskbar-autohide-instant-show"]
     now = int(time.time())
     for mod_id, (version, settings) in mods.items():
         fields = {
@@ -100,11 +103,17 @@ def main():
             "Version": version,
             "SettingsChangeTime": now,
         }
-        if args.log and mod_id == "local@quiet-dock":
+        if args.log and mod_id.startswith("local@"):
             fields["LoggingEnabled"] = 1
         changed = write_ini(mods_dir / f"{mod_id}.ini", fields, settings, args.force)
         state = "disabled" if args.off else "enabled"
         print(f"{mod_id}: {len(settings)} settings, {state}{'' if changed else ' (unchanged)'}")
+
+    for mod_id in superseded:
+        ini = mods_dir / f"{mod_id}.ini"
+        if ini.exists():
+            ini.unlink()
+            print(f"{mod_id}: removed (superseded)")
 
 
 if __name__ == "__main__":

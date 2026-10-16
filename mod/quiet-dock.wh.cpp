@@ -1544,6 +1544,9 @@ void OnRendering(void* key) {
         auto now = std::chrono::steady_clock::now();
 
         double deltaTime = std::chrono::duration<double, std::milli>(now - ctx.lastRenderTime).count();
+        if (deltaTime > 25.0 && ctx.lastRenderTime != std::chrono::steady_clock::time_point{}) {
+            Wh_Log(L"DockAnimation: slow frame %.1f ms", deltaTime);
+        }
         deltaTime = std::clamp(deltaTime, 0.0, MAX_FRAME_MS);
         ctx.lastRenderTime = now;
 
