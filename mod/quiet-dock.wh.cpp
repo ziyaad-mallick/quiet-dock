@@ -224,7 +224,7 @@ visual design are theirs.
     Maximum scale (28 x 157% = 44): magnified icons then show native pixels
     instead of a stretched bitmap. Icons are also packed at this size plus the
     gap below. 0 = off (icons keep Windows' size and spacing).
-- IconGap: 6
+- IconGap: 10
   $name: Gap between icons (px)
   $description: Space between icons at rest, when Rest icon size is on
 - DockPadding: 10

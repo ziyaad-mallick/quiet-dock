@@ -1,15 +1,15 @@
 # For the "Taskbar Auto-Hide Instant Show" Windhawk mod (by Bo0ii), with
 # Windows' "Automatically hide the taskbar" on.
 # The dock springs up the moment the cursor touches the bottom edge, with a
-# slight overshoot, and drops away quickly once the cursor leaves.
+# slight overshoot, and drops away a second after the cursor leaves.
 # edgeDetection stays off: it adds a thread that polls the cursor every 20ms.
 animationType: overshoot
 showSpeedup: 400
 hideSpeedup: 400
-showDuration: 320
-hideDuration: 160
+showDuration: 420
+hideDuration: 200
 frameRate: 60
 unhideDelay: 1
-hideDelay: 150
+hideDelay: 1000
 oldTaskbarOnWin11: false
 edgeDetection: false
