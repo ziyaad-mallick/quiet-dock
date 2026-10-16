@@ -48,12 +48,13 @@ controlStyles:
   - target: Taskbar.TaskbarFrame > Grid#RootGrid
     styles:
       - Padding=10,14,10,0
-  - target: Taskbar.TaskbarFrame > Grid#RootGrid > Taskbar.TaskbarBackground
-    styles:
-      - Margin=-6,6,-6,6
+  # quiet-dock owns the TaskbarBackground's margins (it sizes the pill to
+  # the icons every frame) and the Styler re-applies any style it sets, so
+  # the theme's vertical inset goes on the layer inside it instead.
   # Outer layer: the specular rim.
   - target: Taskbar.TaskbarFrame > Grid#RootGrid > Taskbar.TaskbarBackground > Grid
     styles:
+      - Margin=0,6,0,6
       - CornerRadius=$Radius
       - BorderThickness=1
       - BorderBrush:=$Rim
@@ -91,13 +92,15 @@ controlStyles:
       - Visibility=Collapsed
   # Running apps get a small dot instead of the Windows underline. The
   # active/inactive visual states animate Width, so MaxWidth caps it.
+  # quiet-dock scales whole buttons by 28/44 around the icon center, so the
+  # dot is drawn 6 -> ~4px and lands ~4px under the icon.
   - target: Rectangle#RunningIndicator
     styles:
-      - MaxWidth=4
-      - MaxHeight=4
-      - RadiusX=2
-      - RadiusY=2
-      - Margin=0,0,0,8
+      - MaxWidth=6
+      - MaxHeight=6
+      - RadiusX=3
+      - RadiusY=3
+      - Margin=0,0,0,0
       - Fill:=<SolidColorBrush Color="#FFFFFF" Opacity="0.7" />
   # No hover/active tile behind icons: macOS has none.
   - target: Grid#IconPanel > Border#BackgroundElement

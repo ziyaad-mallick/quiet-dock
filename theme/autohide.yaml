@@ -6,8 +6,8 @@
 animationType: overshoot
 showSpeedup: 400
 hideSpeedup: 400
-showDuration: 260
-hideDuration: 140
+showDuration: 320
+hideDuration: 160
 frameRate: 60
 unhideDelay: 1
 hideDelay: 150

@@ -1,11 +1,14 @@
 # For the "Taskbar height and icon size" Windhawk mod (by m417z):
 # Settings > Textual mode, paste, Save settings.
 # 76 = 20px headroom for magnified icons + a 50px pill + a 6px float gap.
-# Icon sizes are multiples of 4 so they land on whole pixels at 125% scaling
-# (28 -> 35px); other sizes get resampled and look soft.
-# Button width 40 = 28px icon + 12px gap.
+# IconSize is the size icons are RENDERED at: quiet-dock shows them at its
+# Rest icon size (28) and magnifies back up to this, so it should be
+# 28 x 157% = 44 -- magnified icons then show native pixels. Multiples of 4
+# land on whole pixels at 125% scaling (44 -> 55px).
+# Button width 48 just fits the 44px icon; quiet-dock packs the icons at its
+# own, tighter pitch.
 TaskbarHeight: 76
-IconSize: 28
-TaskbarButtonWidth: 40
+IconSize: 44
+TaskbarButtonWidth: 48
 IconSizeSmall: 16
 TaskbarButtonWidthSmall: 32

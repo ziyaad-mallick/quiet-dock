@@ -96,7 +96,7 @@ visual design are theirs.
   $description:ko-KR: 커서로부터 애니메이션이 적용되는 거리
   $description:pt-BR: Distância do cursor em que a animação é aplicada
   $description:it-IT: Distanza dal cursore entro cui si applica l’animazione
-- SpacingFactor: 50
+- SpacingFactor: 100
   $name: Spacing sensitivity (%)
   $name:uk-UA: Чутливість до проміжку (%)
   $name:zh-CN: 间距灵敏度（%）
@@ -104,7 +104,7 @@ visual design are theirs.
   $name:ko-KR: 간격 민감도(%)
   $name:pt-BR: Sensibilidade do espaçamento (%)
   $name:it-IT: Sensibilità spaziatura (%)
-  $description: How much neighboring icons move apart during animation (default 50%)
+  $description: How much neighboring icons move apart during animation (100% = they make room for the full magnified size, like macOS)
   $description:uk-UA: Наскільки сусідні іконки розсуваються під час анімації (за замовчуванням 50%)
   $description:zh-CN: 动画时相邻图标拉开的程度（默认 50%）
   $description:ja-JP: アニメーション中に隣のアイコンが離れる度合い（既定 50%）
@@ -216,6 +216,22 @@ visual design are theirs.
   $description:ko-KR: 대기 상태 ‘호흡’ 바운스를 완전히 비활성화합니다
   $description:pt-BR: Desativa totalmente o bounce ocioso (“respirar”)
   $description:it-IT: Disattiva completamente il bounce inattivo (“respiro”)
+- RestIconSize: 28
+  $name: Rest icon size (px)
+  $description: >-
+    Draw icons at this size when not hovered. Windows renders them at the
+    "Taskbar height and icon size" icon size, so set that to this value times
+    Maximum scale (28 x 157% = 44): magnified icons then show native pixels
+    instead of a stretched bitmap. Icons are also packed at this size plus the
+    gap below. 0 = off (icons keep Windows' size and spacing).
+- IconGap: 6
+  $name: Gap between icons (px)
+  $description: Space between icons at rest, when Rest icon size is on
+- DockPadding: 10
+  $name: Dock padding (px)
+  $description: >-
+    Space between the outer icons and the edge of the taskbar background, which
+    is resized to fit the icons as they magnify
 */
 // ==/WindhawkModSettings==
 
@@ -260,6 +276,9 @@ struct {
     int excludeSystemButtonsMode;
     double lerpSpeed;
     bool disableBounce;
+    double restIconSize;
+    double iconGap;
+    double dockPadding;
 } g_settings;
 
 
@@ -294,8 +313,11 @@ struct IconAnimState {
     double waveTranslateX = 0.0;
 };
 
-// The four transforms in an icon's TransformGroup, looked up once.
+// The transforms in an icon's TransformGroup, looked up once. Applied in
+// order: base (rest size), wave (magnification), wave translate, bounce.
+const uint32_t TRANSFORM_COUNT = 5;
 struct IconTransforms {
+    ScaleTransform baseScale{nullptr};
     ScaleTransform waveScale{nullptr};
     TranslateTransform waveTranslate{nullptr};
     ScaleTransform bounceScale{nullptr};
@@ -304,6 +326,7 @@ struct IconTransforms {
 
 // Values last written to the transforms. NaN forces the next write.
 struct AppliedValues {
+    double baseScale = NAN;
     double waveScale = NAN;
     double waveTranslate = NAN;
     double bounceScale = NAN;
@@ -315,6 +338,11 @@ struct TaskbarIconInfo {
     winrt::weak_ref<FrameworkElement> element;
     double originalCenterX = 0.0;
     double elementWidth = 0.0;
+    // Icon geometry inside the button, for the scale centers: the icon
+    // shrinks around its center and magnifies from its (rest) bottom edge.
+    double iconCenterY = 0.0;
+    double iconSize = 0.0;  // 0 when the button has no "Icon" element
+    double baseScale = 1.0;
     IconAnimState state;
     IconTransforms tf;
     AppliedValues applied;
@@ -327,6 +355,7 @@ struct HostSignature {
 };
 
 struct DockAnimationContext {
+    void* key = nullptr;  // its g_contexts key, for StartRendering
     bool isInitialized = false;
     winrt::weak_ref<FrameworkElement> taskbarFrame;
     winrt::weak_ref<FrameworkElement> iconHost;
@@ -353,9 +382,32 @@ struct DockAnimationContext {
     std::chrono::steady_clock::time_point lastSignificantMoveTime{};
     std::chrono::steady_clock::time_point bounceStartTime{};
 
+    // Set by the layout hook: icons were added, removed or moved, so the
+    // next frame rebuilds the icon list and reapplies the rest layout.
+    bool needsRefresh = true;
+
+    // The frame's background element (the dock pill in a dock theme). Its
+    // horizontal margins are driven to wrap the icons; vertical ones are left
+    // as the theme set them. baseMargin is restored on unload.
+    winrt::weak_ref<FrameworkElement> background;
+    Thickness backgroundBaseMargin{};
+    bool backgroundBaseKnown = false;
+    double backgroundSlotLeft = 0.0;   // its layout slot, frame coordinates
+    double backgroundSlotRight = 0.0;
+    double appliedBackgroundLeft = NAN;
+    double appliedBackgroundRight = NAN;
+    // While icons magnify, the pill is stretched with a render transform
+    // (no layout pass) from its rest extent, which the margins hold.
+    winrt::weak_ref<FrameworkElement> backgroundLayer;
+    ScaleTransform backgroundScale{nullptr};
+    TranslateTransform backgroundTranslate{nullptr};
+    double appliedBackgroundScale = NAN;
+    double appliedBackgroundShift = NAN;
+
     // Per-frame scratch buffers, kept to avoid reallocating every frame.
     std::vector<double> scales;
-    std::vector<double> extraWidths;
+    std::vector<double> restSlots;
+    std::vector<double> restCenters;
 };
 
 // One context per monitor (keyed by XAML instance pointer). Contexts are
@@ -364,6 +416,12 @@ struct DockAnimationContext {
 // its nodes, so a context pointer stays valid until the map is cleared.
 std::map<void*, DockAnimationContext> g_contexts;
 std::mutex g_contextsMutex;
+
+// Each hook gets a different interface pointer for the same TaskbarFrame,
+// so contexts are keyed by the object's IUnknown identity.
+void* FrameKey(FrameworkElement const& frame) {
+    return winrt::get_abi(frame.as<winrt::Windows::Foundation::IUnknown>());
+}
 
 DockAnimationContext* FindContext(void* key) {
     std::lock_guard<std::mutex> lock(g_contextsMutex);
@@ -528,42 +586,121 @@ static void WriteIfChanged(double& applied, double value, double epsilon, Setter
     applied = value;
 }
 
-// Advances every icon one frame toward its target. Returns true while any
-// icon is still moving, so the caller knows when the loop can stop.
+/// Rest-size mode packs icons at their own pitch and shrinks them; it needs a
+// horizontal taskbar where every button is managed by the dock.
+static bool RestSizeActive(DockAnimationContext const& ctx) {
+    return g_settings.restIconSize > 0 && !ctx.isVertical &&
+           g_settings.excludeSystemButtonsMode == 0;
+}
+
+// Sizes the background (the dock pill). Its margins hold the rest extent,
+// a layout change, so they only move when the icons change. While icons
+// magnify, it is stretched to [left, right] with a render transform instead:
+// a layout pass every frame re-triggers the taskbar's auto-hide logic.
+static void ApplyBackgroundExtent(DockAnimationContext& ctx, double restLeft, double restRight,
+                                  double left, double right) {
+    auto bg = ctx.background.get();
+    if (!bg || !ctx.backgroundBaseKnown || restRight <= restLeft) return;
+
+    double marginLeft = restLeft - ctx.backgroundSlotLeft;
+    double marginRight = ctx.backgroundSlotRight - restRight;
+    if (!(std::abs(marginLeft - ctx.appliedBackgroundLeft) < 0.5 &&
+          std::abs(marginRight - ctx.appliedBackgroundRight) < 0.5)) {
+        Thickness m = bg.Margin();
+        m.Left = marginLeft;
+        m.Right = marginRight;
+        bg.Margin(m);
+        ctx.appliedBackgroundLeft = marginLeft;
+        ctx.appliedBackgroundRight = marginRight;
+    }
+
+    if (!ctx.backgroundScale) {
+        // The stretch goes on the background's first child (the pill's
+        // layers in a dock theme): Windows replaces the TaskbarBackground's
+        // own RenderTransform every frame.
+        auto layer = VisualTreeHelper::GetChildrenCount(bg) > 0
+                         ? VisualTreeHelper::GetChild(bg, 0).try_as<FrameworkElement>()
+                         : nullptr;
+        if (!layer) return;
+        TransformGroup tg;
+        ctx.backgroundScale = ScaleTransform();
+        ctx.backgroundTranslate = TranslateTransform();
+        tg.Children().Append(ctx.backgroundScale);
+        tg.Children().Append(ctx.backgroundTranslate);
+        layer.RenderTransform(tg);
+        layer.RenderTransformOrigin({0.5f, 0.5f});
+        ctx.backgroundLayer = layer;
+        ctx.appliedBackgroundScale = NAN;
+        ctx.appliedBackgroundShift = NAN;
+    }
+    double scale = (right - left) / (restRight - restLeft);
+    double shift = (left + right) / 2.0 - (restLeft + restRight) / 2.0;
+    WriteIfChanged(ctx.appliedBackgroundScale, scale, SCALE_EPSILON / 10, [&](double v) {
+        ctx.backgroundScale.ScaleX(v);
+    });
+    WriteIfChanged(ctx.appliedBackgroundShift, shift, TRANSLATE_EPSILON / 10, [&](double v) {
+        ctx.backgroundTranslate.X(v);
+    });
+}
+
+// Advances every icon one frame toward its target and sizes the background
+// to wrap them. Returns true while any icon is still moving, so the caller
+// knows when the loop can stop.
+//
+// Icons are laid out by the dock, not by Windows: each gets a slot (its rest
+// pitch, widened by its magnification), the slots are packed side by side
+// around the center of Windows' layout, and each icon is translated from
+// where Windows put it to the center of its slot. At intensity 0 this is the
+// rest layout, which in rest-size mode is not the identity.
 bool ApplyAnimation(DockAnimationContext& ctx, double dtSec) {
+    const size_t n = ctx.icons.size();
+    if (n == 0 || !ctx.taskbarFrame.get()) return false;
+
+    const bool restMode = RestSizeActive(ctx);
     const double spacingFactor = g_settings.spacingFactor;
     const double mouseX = ctx.mousePos == -1.0 ? 0.0 : ctx.mousePos;
     const double intensity = ctx.intensity;
-    const size_t n = ctx.icons.size();
+
     ctx.scales.assign(n, 1.0);
-    ctx.extraWidths.assign(n, 0.0);
-    auto& scales = ctx.scales;
-    auto& extraWidths = ctx.extraWidths;
-    double totalExpansion = 0.0;
+    ctx.restSlots.assign(n, 0.0);
+    ctx.restCenters.assign(n, 0.0);
+
+    // Rest slots, packed around the center of Windows' layout.
+    const double dockCenter =
+        (ctx.icons.front().originalCenterX + ctx.icons.back().originalCenterX +
+         (g_settings.taskbarLabelsMode
+              ? ctx.icons.back().elementWidth
+              : 0.0)) / 2.0;
+    double restTotal = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        ctx.restSlots[i] = restMode ? g_settings.restIconSize + g_settings.iconGap
+                                    : ctx.icons[i].elementWidth;
+        restTotal += ctx.restSlots[i];
+    }
+    {
+        double cum = dockCenter - restTotal / 2.0;
+        for (size_t i = 0; i < n; i++) {
+            ctx.restCenters[i] = cum + ctx.restSlots[i] / 2.0;
+            cum += ctx.restSlots[i];
+        }
+    }
+
+    // Magnification from the distance to each icon's rest position, so the
+    // wave doesn't chase the icons as they spread.
     size_t closestIconIndex = (size_t)-1;
     double minDistance = g_settings.effectRadius + 1.0;
-    if (!ctx.taskbarFrame.get()) return false;
     for (size_t i = 0; i < n; i++) {
-        auto& icon = ctx.icons[i];
-        if (!icon.tf.waveScale) continue;
-        double distance = 0.0;
-        if (g_settings.taskbarLabelsMode) {
-            double iconStart = icon.originalCenterX;
-            double iconEnd = iconStart + icon.elementWidth;
-            if (mouseX < iconStart) {
-                distance = iconStart - mouseX;
-            } else if (mouseX > iconEnd) {
-                distance = mouseX - iconEnd;
-            } else {
-                distance = 0.0;
-            }
+        double distance;
+        if (g_settings.taskbarLabelsMode && !restMode) {
+            double iconStart = ctx.restCenters[i] - ctx.restSlots[i] / 2.0;
+            double iconEnd = iconStart + ctx.restSlots[i];
+            distance = mouseX < iconStart ? iconStart - mouseX
+                     : mouseX > iconEnd   ? mouseX - iconEnd
+                                          : 0.0;
         } else {
-            distance = std::abs(mouseX - icon.originalCenterX);
+            distance = std::abs(mouseX - ctx.restCenters[i]);
         }
-        scales[i] = CalculateScale(distance, (double)g_settings.effectRadius, g_settings.maxScale);
-        extraWidths[i] = (scales[i] - 1.0) * icon.elementWidth * spacingFactor;
-        totalExpansion += extraWidths[i];
-
+        ctx.scales[i] = CalculateScale(distance, (double)g_settings.effectRadius, g_settings.maxScale);
         if (distance < minDistance) {
             minDistance = distance;
             closestIconIndex = i;
@@ -602,23 +739,31 @@ bool ApplyAnimation(DockAnimationContext& ctx, double dtSec) {
     }
     alpha = std::clamp(alpha, 0.0, 1.0);
 
+    // Target slots at the current intensity, packed around the same center.
+    double total = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        double m = 1.0 + (ctx.scales[i] - 1.0) * intensity;
+        ctx.scales[i] = m;
+        total += ctx.restSlots[i] * (1.0 + (m - 1.0) * spacingFactor);
+    }
+
     const bool vertical = ctx.isVertical;
-    double cumulativeShift = 0.0;
+    double cum = dockCenter - total / 2.0;
     bool moving = false;
+    double visualLeft = INFINITY;
+    double visualRight = -INFINITY;
 
     for (size_t i = 0; i < n; i++) {
         auto& icon = ctx.icons[i];
         auto& tf = icon.tf;
-        if (!tf.waveScale || !tf.waveTranslate || !tf.bounceScale || !tf.bounceTranslate) continue;
-        double selfShift = extraWidths[i] / 2.0;
-        double centerOffset = totalExpansion / 2.0;
-        double finalShift = cumulativeShift + selfShift - centerOffset;
-        cumulativeShift += extraWidths[i];
-        double targetScale = 1.0 + (scales[i] - 1.0) * intensity;
-        double targetTranslate = finalShift * intensity;
+        double slot = ctx.restSlots[i] * (1.0 + (ctx.scales[i] - 1.0) * spacingFactor);
+        double targetScale = ctx.scales[i];
+        double targetTranslate = cum + slot / 2.0 - icon.originalCenterX;
+        cum += slot;
+        if (!tf.baseScale || !tf.waveScale || !tf.waveTranslate || !tf.bounceScale || !tf.bounceTranslate) continue;
 
         auto& state = icon.state;
-        if (g_settings.lerpSpeed > 0.0) {
+        if (g_settings.lerpSpeed > 0.0 && !std::isnan(state.waveTranslateX)) {
             state.waveScale += (targetScale - state.waveScale) * alpha;
             state.waveTranslateX += (targetTranslate - state.waveTranslateX) * alpha;
         } else {
@@ -635,6 +780,11 @@ bool ApplyAnimation(DockAnimationContext& ctx, double dtSec) {
             moving = true;
         }
 
+        double base = restMode ? icon.baseScale : 1.0;
+        WriteIfChanged(icon.applied.baseScale, base, SCALE_EPSILON / 10, [&](double v) {
+            tf.baseScale.ScaleX(v);
+            tf.baseScale.ScaleY(v);
+        });
         WriteIfChanged(icon.applied.waveScale, state.waveScale, SCALE_EPSILON / 10, [&](double v) {
             tf.waveScale.ScaleX(v);
             tf.waveScale.ScaleY(v);
@@ -658,38 +808,61 @@ bool ApplyAnimation(DockAnimationContext& ctx, double dtSec) {
         WriteIfChanged(icon.applied.bounceTranslate, bTranslate, TRANSLATE_EPSILON / 10, [&](double v) {
             if (vertical) tf.bounceTranslate.X(v); else tf.bounceTranslate.Y(v);
         });
+
+        // Visual extent of this icon's slot as currently drawn.
+        double drawnSlot = ctx.restSlots[i] * (1.0 + (state.waveScale - 1.0) * spacingFactor);
+        double drawnCenter = icon.originalCenterX + state.waveTranslateX;
+        visualLeft = std::min(visualLeft, drawnCenter - drawnSlot / 2.0);
+        visualRight = std::max(visualRight, drawnCenter + drawnSlot / 2.0);
+    }
+
+    if (!vertical && visualLeft < visualRight) {
+        // The slots already include the gap; pad by what's left of it.
+        double pad = g_settings.dockPadding - (restMode ? g_settings.iconGap / 2.0 : 0.0);
+        ApplyBackgroundExtent(ctx, dockCenter - restTotal / 2.0 - pad, dockCenter + restTotal / 2.0 + pad,
+                              visualLeft - pad, visualRight + pad);
     }
 
     return moving;
 }
 
+// Back to Windows' own layout: identity transforms and the theme's margin.
 void ResetAllIconScales(std::vector<TaskbarIconInfo>& icons) {
     if (icons.empty()) return;
     try {
         for (auto& iconInfo : icons) {
             auto& tf = iconInfo.tf;
-            if (tf.waveScale) {
-                tf.waveScale.ScaleX(1.0);
-                tf.waveScale.ScaleY(1.0);
+            for (ScaleTransform s : {tf.baseScale, tf.waveScale, tf.bounceScale}) {
+                if (s) {
+                    s.ScaleX(1.0);
+                    s.ScaleY(1.0);
+                }
             }
-            if (tf.waveTranslate) {
-                tf.waveTranslate.X(0.0);
-                tf.waveTranslate.Y(0.0);
-            }
-            if (tf.bounceScale) {
-                tf.bounceScale.ScaleX(1.0);
-                tf.bounceScale.ScaleY(1.0);
-            }
-            if (tf.bounceTranslate) {
-                tf.bounceTranslate.X(0.0);
-                tf.bounceTranslate.Y(0.0);
+            for (TranslateTransform t : {tf.waveTranslate, tf.bounceTranslate}) {
+                if (t) {
+                    t.X(0.0);
+                    t.Y(0.0);
+                }
             }
             iconInfo.state = IconAnimState{};
-            iconInfo.applied = AppliedValues{1.0, 0.0, 1.0, 0.0};
+            iconInfo.applied = AppliedValues{1.0, 1.0, 0.0, 1.0, 0.0};
         }
     } catch (winrt::hresult_error const& e) {
         Wh_Log(L"DockAnimation: HRESULT error in ResetAllIconScales: %s", e.message().c_str());
     }
+}
+
+static void RestoreBackground(DockAnimationContext& ctx) {
+    if (auto bg = ctx.background.get(); bg && ctx.backgroundBaseKnown) {
+        bg.Margin(ctx.backgroundBaseMargin);
+    }
+    if (auto layer = ctx.backgroundLayer.get(); layer && ctx.backgroundScale) {
+        layer.RenderTransform(nullptr);
+    }
+    ctx.backgroundScale = nullptr;
+    ctx.backgroundTranslate = nullptr;
+    ctx.appliedBackgroundLeft = NAN;
+    ctx.appliedBackgroundRight = NAN;
 }
 
 // Subscribes this taskbar's frame callback. Must run on the taskbar's thread.
@@ -725,6 +898,8 @@ void OnTaskbarPointerMoved(DockAnimationContext& ctx, void* key, Input::PointerR
         }
         ctx.mousePos = mousePos;
         if (!ctx.isRenderingHooked) {
+            Wh_Log(L"DockAnimation: pointer at %.1f, waking (icons=%zu intensity=%.2f)",
+                   mousePos, ctx.icons.size(), ctx.intensity);
             StartRendering(ctx, key);
             ctx.lastSignificantMoveTime = std::chrono::steady_clock::now();
         }
@@ -737,6 +912,7 @@ void OnTaskbarPointerExited(DockAnimationContext& ctx, void* key) {
     try {
         ctx.isMouseInside = false;
         ctx.isBouncing = false;
+        Wh_Log(L"DockAnimation: pointer exited (intensity=%.2f)", ctx.intensity);
         // The loop may be asleep on a settled dock; wake it to animate out.
         StartRendering(ctx, key);
     } catch (winrt::hresult_error const& e) {
@@ -858,17 +1034,138 @@ static bool ShouldAnimateElement(FrameworkElement const& e) {
 
 static void ResetElementTransforms(FrameworkElement const& element) {
     auto tg = element.RenderTransform().try_as<TransformGroup>();
-    if (!tg || tg.Children().Size() < 4) return;
+    if (!tg) return;
+    for (auto const& child : tg.Children()) {
+        if (auto s = child.try_as<ScaleTransform>()) {
+            s.ScaleX(1.0);
+            s.ScaleY(1.0);
+        } else if (auto t = child.try_as<TranslateTransform>()) {
+            t.X(0.0);
+            t.Y(0.0);
+        }
+    }
+}
 
-    auto waveScale = tg.Children().GetAt(0).try_as<ScaleTransform>();
-    auto waveTranslate = tg.Children().GetAt(1).try_as<TranslateTransform>();
-    auto bounceScale = tg.Children().GetAt(2).try_as<ScaleTransform>();
-    auto bounceTranslate = tg.Children().GetAt(3).try_as<TranslateTransform>();
+// Breadth-first search for a named descendant, a few levels deep.
+static FrameworkElement FindNamedDescendant(FrameworkElement const& root, PCWSTR name, int maxNodes = 64) {
+    std::vector<FrameworkElement> queue{root};
+    for (size_t i = 0; i < queue.size() && (int)i < maxNodes; i++) {
+        int c = VisualTreeHelper::GetChildrenCount(queue[i]);
+        for (int j = 0; j < c; j++) {
+            auto ch = VisualTreeHelper::GetChild(queue[i], j).try_as<FrameworkElement>();
+            if (!ch) continue;
+            if (ch.Name() == name) return ch;
+            queue.push_back(ch);
+        }
+    }
+    return nullptr;
+}
 
-    if (waveScale) { waveScale.ScaleX(1.0); waveScale.ScaleY(1.0); }
-    if (waveTranslate) { waveTranslate.X(0.0); waveTranslate.Y(0.0); }
-    if (bounceScale) { bounceScale.ScaleX(1.0); bounceScale.ScaleY(1.0); }
-    if (bounceTranslate) { bounceTranslate.X(0.0); bounceTranslate.Y(0.0); }
+// Reads where Windows put the button and its icon, and sets the scale
+// pivots: the rest-size scale shrinks the icon around its own center, and
+// magnification grows it from its rest bottom edge, the way macOS does.
+// Returns true if the button moved or resized.
+static bool UpdateIconGeometry(DockAnimationContext& ctx, TaskbarIconInfo& info,
+                               FrameworkElement const& e, FrameworkElement const& frame) {
+    double oldX = info.originalCenterX;
+    double oldW = info.elementWidth;
+
+    // Where Windows laid the button out. TransformToVisual on the button
+    // itself would include the dock's own transforms and feed them back in,
+    // so measure its layout offset from the (untransformed) parent instead.
+    winrt::Windows::Foundation::Point pt;
+    if (auto parent = VisualTreeHelper::GetParent(e).try_as<UIElement>()) {
+        auto offset = e.ActualOffset();
+        pt = parent.TransformToVisual(frame).TransformPoint({offset.x, offset.y});
+    } else {
+        pt = e.TransformToVisual(frame).TransformPoint({0, 0});
+    }
+    double width = e.ActualWidth();
+    double height = e.ActualHeight();
+    double along = ctx.isVertical ? height : width;
+    info.elementWidth = along;
+
+    if (g_settings.taskbarLabelsMode) {
+        info.originalCenterX = ctx.isVertical ? pt.Y : pt.X;
+    } else {
+        info.originalCenterX = (ctx.isVertical ? pt.Y : pt.X) + along / 2.0;
+    }
+
+    info.iconSize = 0.0;
+    info.iconCenterY = height / 2.0;
+    if (auto icon = FindNamedDescendant(e, L"Icon")) {
+        double size = icon.ActualHeight();
+        if (size > 0) {
+            info.iconSize = size;
+            info.iconCenterY = icon.TransformToVisual(e).TransformPoint({0, 0}).Y + size / 2.0;
+        }
+    }
+    info.baseScale = (g_settings.restIconSize > 0 && info.iconSize > 0)
+                         ? g_settings.restIconSize / info.iconSize
+                         : 1.0;
+
+    // Pivots in element coordinates (origin at the top-left).
+    double baseX = g_settings.taskbarLabelsMode ? 24.0 : width / 2.0;
+    double baseY = info.iconCenterY;
+    double pivotX = baseX;
+    double pivotY;
+    if (ctx.isVertical) {
+        pivotX = (ctx.edge == TaskbarEdge::Left) ? 0.0 : width;
+        pivotY = height / 2.0;
+    } else if (g_settings.disableVerticalBounce) {
+        pivotY = height / 2.0;
+    } else if (ctx.edge == TaskbarEdge::Top) {
+        pivotY = RestSizeActive(ctx) && info.iconSize > 0
+                     ? info.iconCenterY - info.baseScale * info.iconSize / 2.0
+                     : 0.0;
+    } else {
+        pivotY = RestSizeActive(ctx) && info.iconSize > 0
+                     ? info.iconCenterY + info.baseScale * info.iconSize / 2.0
+                     : height;
+    }
+
+    e.RenderTransformOrigin({0.0f, 0.0f});
+    if (info.tf.baseScale) {
+        info.tf.baseScale.CenterX(baseX);
+        info.tf.baseScale.CenterY(baseY);
+    }
+    for (ScaleTransform s : {info.tf.waveScale, info.tf.bounceScale}) {
+        if (s) {
+            s.CenterX(pivotX);
+            s.CenterY(pivotY);
+        }
+    }
+
+    return std::abs(info.originalCenterX - oldX) > 0.5 || std::abs(along - oldW) > 0.5;
+}
+
+// The frame's background (the dock pill) and the layout slot its margins
+// are measured from.
+static void UpdateBackgroundGeometry(DockAnimationContext& ctx, FrameworkElement const& frame) {
+    auto bg = ctx.background.get();
+    if (!bg) {
+        auto rootGrid = FindNamedDescendant(frame, L"RootGrid", 8);
+        if (!rootGrid) return;
+        bg = FindChildByClassName(rootGrid, L"Taskbar.TaskbarBackground");
+        if (!bg) return;
+        ctx.background = bg;
+        ctx.backgroundBaseMargin = bg.Margin();
+        ctx.backgroundBaseKnown = true;
+        ctx.appliedBackgroundLeft = NAN;
+        ctx.appliedBackgroundRight = NAN;
+    }
+    // Layout position only: TransformToVisual on bg would include the
+    // stretch transform the dock puts on it.
+    winrt::Windows::Foundation::Point p;
+    if (auto parent = VisualTreeHelper::GetParent(bg).try_as<UIElement>()) {
+        auto offset = bg.ActualOffset();
+        p = parent.TransformToVisual(frame).TransformPoint({offset.x, offset.y});
+    } else {
+        p = bg.TransformToVisual(frame).TransformPoint({0, 0});
+    }
+    Thickness m = bg.Margin();
+    ctx.backgroundSlotLeft = p.X - m.Left;
+    ctx.backgroundSlotRight = p.X + bg.ActualWidth() + m.Right;
 }
 
 static bool RebaseIconGeometryFast(DockAnimationContext& ctx) {
@@ -889,54 +1186,15 @@ static bool RebaseIconGeometryFast(DockAnimationContext& ctx) {
     for (auto& info : ctx.icons) {
         auto e = info.element.get();
         if (!e) continue;
-
         try {
-            double oldX = info.originalCenterX;
-            double oldW = info.elementWidth;
-
-            auto t = e.TransformToVisual(frame);
-            auto pt = t.TransformPoint({0, 0});
-            double w = ctx.isVertical ? e.ActualHeight() : e.ActualWidth();
-            info.elementWidth = w;
-
-            float xOrigin = 0.5f;
-            float yOrigin = 0.5f;
-            if (ctx.isVertical) {
-                xOrigin = (ctx.edge == TaskbarEdge::Left) ? 0.0f : 1.0f;
-            } else {
-                bool isTop = (ctx.edge == TaskbarEdge::Top);
-                yOrigin = g_settings.disableVerticalBounce ? 0.5f : (isTop ? 0.0f : 1.0f);
-            }
-
-            if (g_settings.taskbarLabelsMode) {
-                double newStartX = ctx.isVertical ? pt.Y : pt.X;
-                info.originalCenterX = newStartX;
-
-                float iconCenterPx = 24.0f;
-                float iconCenterProportion = (w > 0.0) ? (iconCenterPx / (float)w) : 0.5f;
-                if (ctx.isVertical) {
-                    e.RenderTransformOrigin({ xOrigin, iconCenterProportion });
-                } else {
-                    e.RenderTransformOrigin({ iconCenterProportion, yOrigin });
-                }
-
-                if (std::abs(newStartX - oldX) > 0.5) changed = true;
-            } else {
-                double newCenterX = ctx.isVertical ? (pt.Y + (w / 2.0)) : (pt.X + (w / 2.0));
-                info.originalCenterX = newCenterX;
-
-                if (ctx.isVertical) {
-                    e.RenderTransformOrigin({ xOrigin, yOrigin });
-                } else {
-                    e.RenderTransformOrigin({ 0.5f, yOrigin });
-                }
-
-                if (std::abs(newCenterX - oldX) > 0.5) changed = true;
-            }
-
-            if (std::abs(w - oldW) > 0.5) changed = true;
+            if (UpdateIconGeometry(ctx, info, e, frame)) changed = true;
         } catch (...) {
         }
+    }
+
+    try {
+        UpdateBackgroundGeometry(ctx, frame);
+    } catch (...) {
     }
 
     if (changed && ctx.icons.size() > 1) {
@@ -1033,35 +1291,31 @@ void RefreshIconPositions(DockAnimationContext& ctx) {
         try {
             if (!element) return;
 
+            // Collapsed buttons (hidden Task View, Widgets...) have no size;
+            // giving them a slot would leave a gap in the dock.
+            if (element.ActualWidth() < 1 || element.ActualHeight() < 1) {
+                if (prevElements.contains(winrt::get_abi(element))) ResetElementTransforms(element);
+                return;
+            }
+
             auto tg = element.RenderTransform().try_as<TransformGroup>();
-            if (!tg || tg.Children().Size() < 4) {
+            if (!tg || tg.Children().Size() != TRANSFORM_COUNT) {
                 tg = TransformGroup();
-                tg.Children().Append(ScaleTransform());       // 0 waveScale
-                tg.Children().Append(TranslateTransform());   // 1 waveTranslate
-                tg.Children().Append(ScaleTransform());       // 2 bounceScale
-                tg.Children().Append(TranslateTransform());   // 3 bounceTranslate
+                tg.Children().Append(ScaleTransform());       // 0 baseScale
+                tg.Children().Append(ScaleTransform());       // 1 waveScale
+                tg.Children().Append(TranslateTransform());   // 2 waveTranslate
+                tg.Children().Append(ScaleTransform());       // 3 bounceScale
+                tg.Children().Append(TranslateTransform());   // 4 bounceTranslate
                 element.RenderTransform(tg);
             }
 
-            float xOrigin = 0.5f;
-            float yOrigin = 0.5f;
-            if (ctx.isVertical) {
-                xOrigin = (ctx.edge == TaskbarEdge::Left) ? 0.0f : 1.0f;
-            } else {
-                bool isTop = (ctx.edge == TaskbarEdge::Top);
-                yOrigin = g_settings.disableVerticalBounce ? 0.5f : (isTop ? 0.0f : 1.0f);
-            }
-
-            auto transform = element.TransformToVisual(taskbarFrame);
-            auto point = transform.TransformPoint({0, 0});
-
             TaskbarIconInfo info;
             info.element = element;
-            info.elementWidth = ctx.isVertical ? element.ActualHeight() : element.ActualWidth();
-            info.tf.waveScale = tg.Children().GetAt(0).try_as<ScaleTransform>();
-            info.tf.waveTranslate = tg.Children().GetAt(1).try_as<TranslateTransform>();
-            info.tf.bounceScale = tg.Children().GetAt(2).try_as<ScaleTransform>();
-            info.tf.bounceTranslate = tg.Children().GetAt(3).try_as<TranslateTransform>();
+            info.tf.baseScale = tg.Children().GetAt(0).try_as<ScaleTransform>();
+            info.tf.waveScale = tg.Children().GetAt(1).try_as<ScaleTransform>();
+            info.tf.waveTranslate = tg.Children().GetAt(2).try_as<TranslateTransform>();
+            info.tf.bounceScale = tg.Children().GetAt(3).try_as<ScaleTransform>();
+            info.tf.bounceTranslate = tg.Children().GetAt(4).try_as<TranslateTransform>();
             // Per-frame writes only touch the axis along the taskbar; clear
             // the other one in case the taskbar changed orientation.
             if (info.tf.waveTranslate) {
@@ -1071,45 +1325,17 @@ void RefreshIconPositions(DockAnimationContext& ctx) {
                 if (ctx.isVertical) info.tf.bounceTranslate.Y(0.0); else info.tf.bounceTranslate.X(0.0);
             }
 
-            if (g_settings.taskbarLabelsMode) {
-                float iconCenterPx = 24.0f;
-                float iconCenterProportion =
-                    (info.elementWidth > 0) ? (iconCenterPx / (float)info.elementWidth) : 0.5f;
-
-                if (ctx.isVertical) {
-                    element.RenderTransformOrigin({ xOrigin, iconCenterProportion });
-                } else {
-                    element.RenderTransformOrigin({ iconCenterProportion, yOrigin });
-                }
-                info.originalCenterX = ctx.isVertical ? point.Y : point.X;
-            } else {
-                if (ctx.isVertical) {
-                    element.RenderTransformOrigin({ xOrigin, yOrigin });
-                } else {
-                    element.RenderTransformOrigin({ 0.5f, yOrigin });
-                }
-                info.originalCenterX = ctx.isVertical ? (point.Y + (info.elementWidth / 2.0)) : (point.X + (info.elementWidth / 2.0));
-            }
+            UpdateIconGeometry(ctx, info, element, taskbarFrame);
 
             void* key = winrt::get_abi(element);
 
             auto it = prevStates.find(key);
             if (it != prevStates.end()) {
                 info.state = it->second;
-
-                auto waveScale = tg.Children().GetAt(0).try_as<ScaleTransform>();
-                auto waveTranslate = tg.Children().GetAt(1).try_as<TranslateTransform>();
-                if (waveScale) {
-                    waveScale.ScaleX(info.state.waveScale);
-                    waveScale.ScaleY(info.state.waveScale);
-                }
-                if (waveTranslate) {
-                    if (ctx.isVertical) {
-                        waveTranslate.Y(info.state.waveTranslateX);
-                    } else {
-                        waveTranslate.X(info.state.waveTranslateX);
-                    }
-                }
+            } else {
+                // A new button jumps straight to its slot instead of sliding
+                // in from where Windows placed it.
+                info.state.waveTranslateX = NAN;
             }
 
             newIcons.push_back(info);
@@ -1261,7 +1487,28 @@ void RefreshIconPositions(DockAnimationContext& ctx) {
                 return a.originalCenterX < b.originalCenterX;
             });
 
-        ctx.icons = std::move(newIcons);
+        // Keep only real, visible buttons. The host also holds recycled
+        // buttons parked ~10000px off-screen, helpers with no icon, and the
+        // odd duplicate mid-animation; any of them would throw off the dock's
+        // center and spacing.
+        const double frameExtent = ctx.isVertical ? taskbarFrame.ActualHeight() : taskbarFrame.ActualWidth();
+        std::vector<TaskbarIconInfo> kept;
+        kept.reserve(newIcons.size());
+        for (auto& ic : newIcons) {
+            bool keep = ic.originalCenterX >= 0 && ic.originalCenterX <= frameExtent &&
+                        ic.iconSize > 0 &&
+                        (kept.empty() ||
+                         ic.originalCenterX - kept.back().originalCenterX >= kept.back().elementWidth / 2.0);
+            if (keep) {
+                kept.push_back(std::move(ic));
+            } else if (auto el = ic.element.get()) {
+                ResetElementTransforms(el);
+            }
+        }
+
+        ctx.icons = std::move(kept);
+        UpdateBackgroundGeometry(ctx, taskbarFrame);
+        Wh_Log(L"DockAnimation: refreshed %zu icons", ctx.icons.size());
 
     } catch (winrt::hresult_error const& e) {
         Wh_Log(L"DockAnimation: HRESULT error during icon search: %s", e.message().c_str());
@@ -1271,6 +1518,7 @@ void RefreshIconPositions(DockAnimationContext& ctx) {
 DockAnimationContext* InitializeAnimationHooks(void* pThis, FrameworkElement const& taskbarFrame) {
     try {
         DockAnimationContext ctx;
+        ctx.key = pThis;
         ctx.taskbarFrame = taskbarFrame;
         ctx.isInitialized = false;
         ctx.hWnd = GetCurrentThreadTrayWindow();
@@ -1311,24 +1559,11 @@ void OnRendering(void* key) {
             ctx.intensity = std::max(0.0, ctx.intensity - intensityChange);
         }
 
-        if (!ctx.isMouseInside && ctx.intensity <= 0.0) {
-            StopRendering(ctx);
-
-            ResetAllIconScales(ctx.icons);
-            ctx.isInitialized = false;
-            ctx.icons.clear();
-
-            ctx.mousePos = -1.0;
-            ctx.isBouncing = false;
-            ctx.bounceIntensity = 0.0;
-
-            Wh_Log(L"DockAnimation: Stopped render loop (FocusOut complete).");
-            return;
-        }
-
-        if (!ctx.isInitialized) {
+        if (!ctx.isInitialized || ctx.needsRefresh) {
+            UpdateTaskbarEdge(ctx);
             RefreshIconPositions(ctx);
             ctx.isInitialized = true;
+            ctx.needsRefresh = false;
         }
 
         // Dirty-check
@@ -1365,10 +1600,10 @@ void OnRendering(void* key) {
         }
 
         if (ctx.icons.empty()) {
-            if (ctx.isInitialized) {
-                RefreshIconPositions(ctx);
-            }
-            if (ctx.icons.empty()) return;
+            // Nothing laid out yet; the layout hook wakes the loop when
+            // buttons appear.
+            StopRendering(ctx);
+            return;
         }
 
         if (g_settings.disableBounce) {
@@ -1398,6 +1633,16 @@ void OnRendering(void* key) {
 
         bool moving = ApplyAnimation(ctx, dtSec);
 
+        // Back at rest after the cursor left: stop until the next pointer or
+        // layout event. The icons keep their rest transforms.
+        if (!moving && !ctx.isMouseInside && ctx.intensity <= 0.0 &&
+            ctx.bounceIntensity <= 0.0) {
+            StopRendering(ctx);
+            ctx.mousePos = -1.0;
+            ctx.isBouncing = false;
+            return;
+        }
+
         // Settled under a resting cursor: stop until the next pointer event.
         // With the bounce on, a resting cursor is exactly when it plays, so
         // the loop keeps running.
@@ -1405,7 +1650,20 @@ void OnRendering(void* key) {
             g_settings.disableBounce && ctx.bounceIntensity <= 0.0) {
             StopRendering(ctx);
         }
+    } catch (winrt::hresult_error const& e) {
+        Wh_Log(L"DockAnimation: frame failed: %08X %s", (unsigned)e.code(), e.message().c_str());
+        try {
+            StopRendering(ctx);
+        } catch (...) {
+        }
+    } catch (std::exception const& e) {
+        Wh_Log(L"DockAnimation: frame failed: %S", e.what());
+        try {
+            StopRendering(ctx);
+        } catch (...) {
+        }
     } catch (...) {
+        Wh_Log(L"DockAnimation: frame failed (unknown exception)");
         try {
             StopRendering(ctx);
         } catch (...) {
@@ -1434,13 +1692,14 @@ int WINAPI TaskbarFrame_OnPointerMoved_Hook(void* pThis, void* pArgs) {
     if (!args)
         return original();
     // Initialize animation hooks only once
-    DockAnimationContext* ctx = FindContext(pThis);
+    void* key = FrameKey(element);
+    DockAnimationContext* ctx = FindContext(key);
     if (!ctx) {
-        ctx = InitializeAnimationHooks(pThis, element);
+        ctx = InitializeAnimationHooks(key, element);
         Wh_Log(L"DockAnimation: Initialized via OnPointerMoved (%s)", className.c_str());
     }
     // Forward event to existing logic
-    if (ctx) OnTaskbarPointerMoved(*ctx, pThis, args);
+    if (ctx) OnTaskbarPointerMoved(*ctx, key, args);
     return original();
 }
 
@@ -1458,10 +1717,47 @@ int WINAPI TaskbarFrame_OnPointerExited_Hook(void* pThis, void* pArgs) {
     auto className = winrt::get_class_name(element);
     if (className != L"Taskbar.TaskbarFrame")
         return original();
-    if (DockAnimationContext* ctx = FindContext(pThis)) {
-        OnTaskbarPointerExited(*ctx, pThis);
+    void* key = FrameKey(element);
+    if (DockAnimationContext* ctx = FindContext(key)) {
+        OnTaskbarPointerExited(*ctx, key);
     }
     return original();
+}
+
+// Runs whenever Windows lays the taskbar out (startup, a button added or
+// removed). The dock's rest layout isn't Windows' layout, so it has to be
+// reapplied without waiting for the mouse.
+using TaskbarFrame_ArrangeOverride_t =
+    int(WINAPI*)(void* pThis, winrt::Windows::Foundation::Size finalSize, winrt::Windows::Foundation::Size* result);
+TaskbarFrame_ArrangeOverride_t TaskbarFrame_ArrangeOverride_Original;
+
+int WINAPI TaskbarFrame_ArrangeOverride_Hook(void* pThis,
+                                             winrt::Windows::Foundation::Size finalSize,
+                                             winrt::Windows::Foundation::Size* result) {
+    int ret = TaskbarFrame_ArrangeOverride_Original(pThis, finalSize, result);
+    try {
+        FrameworkElement element = nullptr;
+        ((IUnknown*)pThis)->QueryInterface(winrt::guid_of<FrameworkElement>(), winrt::put_abi(element));
+        if (!element || winrt::get_class_name(element) != L"Taskbar.TaskbarFrame") return ret;
+
+        void* key = FrameKey(element);
+        DockAnimationContext* ctx = FindContext(key);
+        if (!ctx) ctx = InitializeAnimationHooks(key, element);
+        if (!ctx) return ret;
+
+        // Resizing the background re-runs this; only a change in the
+        // buttons themselves needs the icon list rebuilt.
+        if (ctx->isInitialized) {
+            auto host = ctx->iconHost.get();
+            if (host && !SigDifferent(ComputeHostSignature(host, ctx->isVertical), ctx->lastSig)) {
+                return ret;
+            }
+        }
+        ctx->needsRefresh = true;
+        StartRendering(*ctx, key);
+    } catch (...) {
+    }
+    return ret;
 }
 
 void LoadSettings() {
@@ -1498,6 +1794,10 @@ void LoadSettings() {
 
     g_settings.disableBounce = (bool)Wh_GetIntSetting(L"DisableBounce");
 
+    g_settings.restIconSize = std::max(0, Wh_GetIntSetting(L"RestIconSize"));
+    g_settings.iconGap = std::max(0, Wh_GetIntSetting(L"IconGap"));
+    g_settings.dockPadding = std::max(0, Wh_GetIntSetting(L"DockPadding"));
+
     Wh_Log(L"DockAnimation: Settings loaded.");
 }
 
@@ -1523,6 +1823,13 @@ bool HookTaskbarViewDllSymbols(HMODULE module) {
             },
             &TaskbarFrame_OnPointerExited_Original,
             TaskbarFrame_OnPointerExited_Hook,
+        },
+        {
+            {
+                LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::Taskbar::implementation::TaskbarFrame,struct winrt::Windows::UI::Xaml::IFrameworkElementOverrides>::ArrangeOverride(struct winrt::Windows::Foundation::Size,struct winrt::Windows::Foundation::Size *))"
+            },
+            &TaskbarFrame_ArrangeOverride_Original,
+            TaskbarFrame_ArrangeOverride_Hook,
         },
     };
     if (!HookSymbols(module, taskbarViewHooks, ARRAYSIZE(taskbarViewHooks))) {
@@ -1674,6 +1981,7 @@ void Wh_ModBeforeUninit() {
     ForEachContextOnItsThread([](DockAnimationContext& ctx) {
         StopRendering(ctx);
         ResetAllIconScales(ctx.icons);
+        RestoreBackground(ctx);
     });
 
     {
@@ -1690,9 +1998,12 @@ void Wh_ModSettingsChanged() {
 
     ForEachContextOnItsThread([](DockAnimationContext& ctx) {
         ResetAllIconScales(ctx.icons);
-        ctx.isInitialized = false;
+        RestoreBackground(ctx);
         ctx.icons.clear();
         ctx.isBouncing = false;
         ctx.bounceIntensity = 0.0;
+        // Reapply the rest layout under the new settings right away.
+        ctx.needsRefresh = true;
+        StartRendering(ctx, ctx.key);
     });
 }

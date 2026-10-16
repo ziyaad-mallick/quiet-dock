@@ -39,20 +39,42 @@ def mod_defaults(source):
     return out
 
 
-def write_ini(path, mod_fields, settings):
-    lines = ["[Mod]"] + [f"{k}={v}" for k, v in mod_fields.items()]
-    lines += ["", "[Settings]"] + [f"{k}={v}" for k, v in settings.items()]
+def write_ini(path, mod_fields, settings, force=False):
+    """Writes the mod's .ini unless only its change time would differ.
+
+    Every write makes the mod reload its settings, and for the Taskbar Styler
+    that means tearing down and re-applying the whole theme.
+    """
+    def render(change_time):
+        fields = dict(mod_fields, SettingsChangeTime=change_time)
+        lines = ["[Mod]"] + [f"{k}={v}" for k, v in fields.items()]
+        lines += ["", "[Settings]"] + [f"{k}={v}" for k, v in settings.items()]
+        return "\r\n".join(lines) + "\r\n"
+
+    if path.exists() and not force:
+        old = path.read_text(encoding="utf-16")
+        old_time = next((l.split("=", 1)[1] for l in old.splitlines()
+                         if l.startswith("SettingsChangeTime=")), "")
+        if old.splitlines() == render(old_time).splitlines():
+            return False
     # UTF-16 with BOM: what GetPrivateProfileStringW reads as Unicode.
-    path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-16", newline="")
+    path.write_text(render(mod_fields["SettingsChangeTime"]), encoding="utf-16", newline="")
+    return True
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--windhawk", default=str(Path.home() / "Windhawk"))
     ap.add_argument("--off", action="store_true")
+    ap.add_argument("--log", action="store_true", help="enable Windhawk logging for quiet-dock")
+    ap.add_argument("--force", action="store_true", help="rewrite every mod, even if unchanged")
     args = ap.parse_args()
     mods_dir = Path(args.windhawk) / "AppData" / "Engine" / "Mods"
-    dlls = {p.name.split("_")[0]: p.name for p in (mods_dir / "64").glob("*.dll")}
+    # Newest build of each mod wins: a loaded DLL can't be overwritten, so a
+    # rebuild goes in under a new name and the engine switches to it.
+    dlls = {}
+    for p in sorted((mods_dir / "64").glob("*.dll"), key=lambda p: p.stat().st_mtime):
+        dlls[p.name.split("_")[0]] = p.name
 
     styler = {"theme": "", "clickThroughTaskbar": 0, "xamlDiagnosticsHandling": "alert"}
     flatten("", yaml.safe_load((REPO / "theme/quiet-dock-liquid-glass.yaml").read_text(encoding="utf-8")), styler)
@@ -78,8 +100,11 @@ def main():
             "Version": version,
             "SettingsChangeTime": now,
         }
-        write_ini(mods_dir / f"{mod_id}.ini", fields, settings)
-        print(f"{mod_id}: {len(settings)} settings, {'disabled' if args.off else 'enabled'}")
+        if args.log and mod_id == "local@quiet-dock":
+            fields["LoggingEnabled"] = 1
+        changed = write_ini(mods_dir / f"{mod_id}.ini", fields, settings, args.force)
+        state = "disabled" if args.off else "enabled"
+        print(f"{mod_id}: {len(settings)} settings, {state}{'' if changed else ' (unchanged)'}")
 
 
 if __name__ == "__main__":
