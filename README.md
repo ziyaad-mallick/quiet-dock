@@ -6,9 +6,14 @@ A macOS-style dock for the Windows 11 taskbar, built on
 - **`mod/quiet-dock.wh.cpp`**: icon magnification on hover. A fork of
   [Taskbar Dock Animation Plus](https://windhawk.net/mods/taskbar-dock-animation-plus)
   that stops using CPU once the dock settles.
-- **`theme/`**: a frosted-glass floating pill for the
+- **`theme/`**: a dark liquid glass floating dock for the
   [Windows 11 Taskbar Styler](https://windhawk.net/mods/windows-11-taskbar-styler)
-  mod, with headroom so magnified icons aren't clipped.
+  mod, with headroom so magnified icons aren't clipped, plus settings for
+  [Taskbar height and icon size](https://windhawk.net/mods/taskbar-icon-size)
+  and [Taskbar Auto-Hide Instant Show](https://windhawk.net/mods/taskbar-autohide-instant-show)
+  (springy reveal).
+- **`tools/apply-portable.py`**: writes all of it into a portable Windhawk,
+  which applies changes live with no admin rights.
 
 **Status:** running daily on Windows 11 build 26300 (1920x1200 at 125%, plus a
 second monitor) with Windhawk 1.7.3 portable. Tuned by screenshot, not yet
@@ -55,8 +60,10 @@ must never style the same property.
 
 You need [Windhawk](https://windhawk.net) (or `winget install RamenSoftware.Windhawk`).
 
-1. In Windhawk, install **Windows 11 Taskbar Styler** and **Taskbar height
-   and icon size** from Explore.
+1. In Windhawk, install **Windows 11 Taskbar Styler**, **Taskbar height
+   and icon size** and (with Windows' "Automatically hide the taskbar" on)
+   **Taskbar Auto-Hide Instant Show** from Explore. Paste
+   `theme/autohide.yaml` into the last one's Settings → Textual mode.
 2. Run `.\copy.ps1 height`, open *Taskbar height and icon size* → Settings →
    Textual mode, paste, Save.
 3. Run `.\copy.ps1 theme`, open *Windows 11 Taskbar Styler* → Settings →
