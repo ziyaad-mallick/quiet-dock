@@ -8,7 +8,7 @@ param([Parameter(Mandatory)][ValidateSet('mod', 'theme', 'height')][string]$What
 
 $file = @{
     mod    = 'mod\quiet-dock.wh.cpp'
-    theme  = 'theme\quiet-dock-frosted.yaml'
+    theme  = 'theme\quiet-dock-liquid-glass.yaml'
     height = 'theme\taskbar-height.yaml'
 }[$What]
 

@@ -1,0 +1,127 @@
+# Quiet Dock: dark liquid glass
+# For the "Windows 11 Taskbar Styler" Windhawk mod: Settings > Textual mode,
+# paste this whole file, Save settings.
+# Pair with "Taskbar height and icon size" at the values in
+# taskbar-height.yaml: the extra height is the empty strip above the pill that
+# magnified icons grow into instead of being clipped.
+# Selectors adapted from the FrostyGlass theme by Guido Lamanna
+# (windows-11-taskbar-styling-guide).
+#
+# Geometry (logical px, taskbar 76 tall): the pill spans 20..70, 50 tall
+# around 28px icons. A 157% icon scaled from the bottom of its button
+# (y=76) tops out at ~5, so it never reaches the window edge.
+styleConstants:
+  # Dark liquid glass: heavy blur, dark tint, light grain. Falls back to a
+  # flat dark fill when transparency effects or battery saver are on.
+  - Glass=<WindhawkBlur BlurAmount="40" TintColor="#16161A" TintOpacity="0.5" NoiseOpacity="0.025" FallbackColor="#E6202024" />
+  # Specular rim: bright along the top, fading, with a faint reflection at
+  # the bottom edge.
+  - Rim=<LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#70FFFFFF" Offset="0" /><GradientStop Color="#18FFFFFF" Offset="0.35" /><GradientStop Color="#0AFFFFFF" Offset="0.7" /><GradientStop Color="#26FFFFFF" Offset="1" /></LinearGradientBrush>
+  # Thin dark hairline just inside the rim, to separate glass from bright
+  # wallpapers.
+  - Hairline=#4D000000
+  - Radius=20
+  - InnerRadius=19
+controlStyles:
+  # Make the full-width taskbar strip invisible; only the pills show.
+  - target: Taskbar.TaskbarBackground#BackgroundControl > Windows.UI.Xaml.Controls.Grid > Windows.UI.Xaml.Shapes.Rectangle#BackgroundFill
+    styles:
+      - Visibility=Collapsed
+  - target: Rectangle#BackgroundStroke
+    styles:
+      - Visibility=Collapsed
+  # The dock: wrap the icons and center them.
+  - target: Taskbar.TaskbarFrame > Grid#RootGrid@DockingStates
+    styles:
+      - Tag=horizontal
+      - Tag@DockedLeft=vertical
+      - Tag@DockedRight=vertical
+      - Tag=>taskbarDock
+  - target: Taskbar.TaskbarFrame
+    styles:
+      - HorizontalAlignment=Center
+      - Width={{taskbarDock==`vertical`?skip():`Auto`}}
+  # The pill is the frame's own background layer, not the icon container:
+  # a container with CornerRadius clips its children, which would cut off
+  # magnified icons at the pill's top edge.
+  # Padding-top 14 centers the icons on the pill (content 14..76, center 45).
+  - target: Taskbar.TaskbarFrame > Grid#RootGrid
+    styles:
+      - Padding=10,14,10,0
+  - target: Taskbar.TaskbarFrame > Grid#RootGrid > Taskbar.TaskbarBackground
+    styles:
+      - Margin=-6,6,-6,6
+  # Outer layer: the specular rim.
+  - target: Taskbar.TaskbarFrame > Grid#RootGrid > Taskbar.TaskbarBackground > Grid
+    styles:
+      - CornerRadius=$Radius
+      - BorderThickness=1
+      - BorderBrush:=$Rim
+  # Inner layer: the glass itself, with the dark hairline.
+  - target: Taskbar.TaskbarFrame > Grid#RootGrid > Taskbar.TaskbarBackground > Grid > Rectangle#BackgroundFill
+    styles:
+      - Visibility=Visible
+      - Fill:=$Glass
+      - RadiusX=$InnerRadius
+      - RadiusY=$InnerRadius
+      - Stroke=$Hairline
+      - StrokeThickness=1
+  # Tray and clock: a matching pill on the right, same height as the dock.
+  - target: StackPanel#SystemTrayFrameGrid, Grid#SystemTrayFrameGrid
+    styles:
+      - Margin=10,20,10,6
+      - Padding=6,0,6,0
+      - CornerRadius=$Radius
+      - Background:=$Glass
+      - BorderThickness=1
+      - BorderBrush:=$Rim
+      - BackgroundSizing=InnerBorderEdge
+  - target: SystemTray.SystemTrayFrame
+    styles:
+      - HorizontalAlignment=Right
+      - Width=Auto
+  # Removed from the dock (his choice 2026-10-16): Task View and Widgets.
+  # Win+Tab and Win+W still open them. Search is hidden by the Windows setting
+  # (Settings > Personalization > Taskbar > Search: Hide); Start stays.
+  - target: Taskbar.ExperienceToggleButton#LaunchListButton[AutomationProperties.AutomationId=TaskViewButton]
+    styles:
+      - Visibility=Collapsed
+  - target: Taskbar.AugmentedEntryPointButton#AugmentedEntryPointButton
+    styles:
+      - Visibility=Collapsed
+  # Running apps get a small dot instead of the Windows underline. The
+  # active/inactive visual states animate Width, so MaxWidth caps it.
+  - target: Rectangle#RunningIndicator
+    styles:
+      - MaxWidth=4
+      - MaxHeight=4
+      - RadiusX=2
+      - RadiusY=2
+      - Margin=0,0,0,8
+      - Fill:=<SolidColorBrush Color="#FFFFFF" Opacity="0.7" />
+  # No hover/active tile behind icons: macOS has none.
+  - target: Grid#IconPanel > Border#BackgroundElement
+    styles:
+      - Visibility=Collapsed
+  - target: Taskbar.TaskListLabeledButtonPanel > Border#BackgroundElement
+    styles:
+      - Visibility=Collapsed
+  - target: Taskbar.TaskListButtonPanel#ExperienceToggleButtonRootPanel > Border#BackgroundElement
+    styles:
+      - Visibility=Collapsed
+  # Window previews and tooltips opened from the dock use the same glass.
+  - target: Border#HoverFlyoutBackground
+    styles:
+      - Background:=$Glass
+      - BorderBrush:=$Rim
+      - BorderThickness=1
+      - CornerRadius=$Radius
+  - target: Taskbar.TaskbarBackground#HoverFlyoutBackgroundControl > Grid > Rectangle#BackgroundFill
+    styles:
+      - Fill:=Transparent
+  - target: Windows.UI.Xaml.Controls.ToolTip > Windows.UI.Xaml.Controls.ContentPresenter#LayoutRoot
+    styles:
+      - Background:=$Glass
+      - BorderBrush:=$Rim
+      - BorderThickness=1
+      - CornerRadius=10

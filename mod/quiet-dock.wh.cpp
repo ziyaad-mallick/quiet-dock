@@ -66,7 +66,7 @@ visual design are theirs.
   $description:ko-KR: 확대/축소 애니메이션 느낌 선택 (0=코사인(부드러움), 1=선형, 2=지수(빠릿함))
   $description:pt-BR: Escolha o tipo de escala (0 = Cosseno (suave), 1 = Linear, 2 = Exponencial (rápido))
   $description:it-IT: Scegli il tipo di scala (0 = Coseno (fluida), 1 = Lineare, 2 = Esponenziale (reattiva))
-- MaxScale: 140
+- MaxScale: 157
   $name: Maximum scale (%)
   $name:uk-UA: Максимальний розмір (%)
   $name:zh-CN: 最大缩放（%）
